@@ -1,8 +1,8 @@
 from dataclasses import dataclass
 import torch
+import math
 import torch.nn as nn
 from torch.nn import functional as F
-
 
 @dataclass 
 class GPTConfig:
@@ -39,13 +39,13 @@ class CausalSelfAttention(nn.Module):
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
 
         attn = (q@k.transpose(-2, -1))*(1/math.sqrt(k.size(-1))) #k is transposed for last 2 dim
-        attn = attn.masked_fill(self.bias[:,:,:T,:T]== 0, float('-inf'))
+        attn = attn.masked_fill(self.causal_mask[:,:,:T,:T]== 0, float('-inf'))
         attn = F.softmax(attn, dim = -1)
 
         y = attn @ v #(B, nh, T, T) * (B, nh, T, hs) -> B, nh, T , hs
 
         y = y.transpose(1, 2).contiguous().view(B,T,C) #.contiguous stores the tensor in contiguous memory block
-        y = self.proj(y)
+        y = self.c_proj(y)
 
         return y
         
@@ -188,3 +188,30 @@ class GPT(nn.Module):
                     sd[k].copy_(sd_hf[k])
 
         return model
+
+# -------Example generation
+import tiktoken
+text = "Hello World... How are,"
+enc = tiktoken.get_encoding('gpt2')
+tokens = enc.encode(text)
+tokens = torch.tensor(tokens, dtype=torch.long)
+tokens = tokens.unsqueeze(0).repeat(num_return_seq, 1)
+x = tokens.to('cuda')
+
+torch.manual_seed(42)
+torch.cuda.manual_seed(42)
+
+while x.size(1) < max_len:
+    with torch.no_grad():
+        logits = gpt_model(x)[0]
+        logits = logits[:,-1,:] #B, vocab_size
+        probs = F.softmax(logits, dim = -1)
+        topk, topk_idx = torch.topk(probs, 50, dim = -1)
+        ix = torch.multinomial(topk, 1)
+        xcol = torch.gather(topk_idx, -1, ix)
+        x = torch.cat((x, xcol), dim = -1)
+
+for i in range(num_return_seq):
+    tokens = x[i, :max_len].tolist()
+    dec = enc.decode(tokens)
+    print(">>>", dec)
